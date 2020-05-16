@@ -1,10 +1,7 @@
 /* Copyright (c) 2018-2020 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
+ * it under the terms of th * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
@@ -5860,20 +5857,120 @@ static void update_sw_icl_max(struct smb_charger *chg, int pst)
 		/*
 		 * USB_PSY will vote to increase the current to 500/900mA once
 		 * enumeration is done.
-		 */
-		if (!is_client_vote_enabled(chg->usb_icl_votable,
-								USB_PSY_VOTER))
-/* @bsp, 2019/04/17 Battery & Charging porting */
-			vote(chg->usb_icl_votable, USB_PSY_VOTER, true,
-					500000);
-		vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, false, 0);
-		break;
-	case POWER_SUPPLY_TYPE_USB_CDP:
-		vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, true,
-					CDP_CURRENT_UA);
-		break;
-	case POWER_SUPPLY_TYPE_USB_DCP:
-		rp_ua = get_rp_based_dcp_current(chg, typec_mode);
+if (rc < 0) {
+		smblib_err(chg, "Couldn't get ICL status rc=%d\n", rc);
+		return;
+	}
+
+	pr_err("AICL result=%dmA\n", settled_ua / 1000);
+}
+
+#define NORMAL_CHECK_INTERVAL 300 /*ms*/
+#define FAST_CHECK_INTERVAL 100 /*ms*/
+#define HIGH_TEMP_SHORT_CHECK_TIMEOUT 1500 /*ms*/
+
+static void op_connect_temp_check_work(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct smb_charger *chg = container_of(dwork,
+				struct smb_charger, connecter_check_work);
+	int batt_temp = 0, interval_temp = 0;
+	int i;
+
+	if (!chg->vbus_present)
+		return;
+
+	chg->connecter_temp = get_usb_temp(chg);
+	batt_temp = get_prop_batt_temp(chg)/10;
+	interval_temp = chg->connecter_temp - batt_temp;
+
+	if (!chg->count_run) {/*count run state keep count_total not change*/
+		if (chg->connecter_temp >= 45) {
+			chg->count_total =
+			HIGH_TEMP_SHORT_CHECK_TIMEOUT/FAST_CHECK_INTERVAL;
+			smblib_dbg(chg, PR_FAST_DEBUG, "> 40! chg->count_total:%d",
+					chg->count_total);
+		} else {
+			chg->count_total =
+			HIGH_TEMP_SHORT_CHECK_TIMEOUT/NORMAL_CHECK_INTERVAL;
+			smblib_dbg(chg, PR_FAST_DEBUG, "<= 40! chg->count_total:%d",
+					chg->count_total);
+		}
+	}
+
+	if ((chg->connecter_temp > 45) || (interval_temp >= 10)) {
+		smblib_dbg(chg, PR_OP_DEBUG, "connecter_temp:%d,batt_temp:%d,\
+		interval_temp:%d,connector_short:%d\n",
+			chg->connecter_temp,
+			batt_temp,
+			interval_temp,
+			chg->connector_short);
+	}
+
+	smblib_dbg(chg, PR_FAST_DEBUG, "connecter_temp:%d,batt_temp:%d,\
+	interval_temp:%d,count_total:%d,count_run:%d,connector_short:%d\n",
+			chg->connecter_temp,
+			batt_temp,
+			interval_temp,
+			chg->count_total,
+			chg->count_run,
+			chg->connector_short);
+	/*error:EOC bit not set! cause connector_temp=125 other 75*/
+	if (chg->connecter_temp == 125 || chg->connecter_temp == 75) {
+		for (i = 0; i <= 9; i++) {
+			msleep(100);
+			smblib_dbg(chg, PR_FAST_DEBUG,
+			"EOC error!temp abormal delay count:%d\n",
+					i);
+		}
+		schedule_delayed_work(&chg->connecter_check_work,
+				msecs_to_jiffies(100));
+		return; /*rerun check again*/
+	}
+
+	if ((chg->connecter_temp >= 60) || chg->connector_short) {
+		pr_info("connecter_temp=%d,connector_short=%d\n",
+				chg->connecter_temp,
+				chg->connector_short);
+		op_disconnect_vbus(chg, true);
+	}
+	else {/*< 60*/
+		if ((interval_temp >= 15) && (chg->connecter_temp >= 45)) {
+			/*interval > 15 && connecter > 50*/
+			pr_info("interval_temp=%d,connecter_temp=%d\n",
+					interval_temp,
+					chg->connecter_temp);
+			op_disconnect_vbus(chg, true);
+			return;
+		} else if (chg->connecter_temp >= 35) {
+		/* >= 35 enter*/
+			if (chg->count_run <= chg->count_total) {
+			/*time out count*/
+				if (chg->count_run == 0)
+					chg->pre_temp = chg->connecter_temp;
+
+				/* time out check MAX=count_total*/
+				if (chg->count_run > 0) {
+					chg->current_temp = chg->connecter_temp;
+					if ((chg->current_temp - chg->pre_temp)
+						>= 3) {
+						chg->connector_short = true;
+						pr_info("cout_run=%d,short=%d\n",
+							chg->count_run,
+							chg->connector_short);
+						op_disconnect_vbus(chg, true);
+						return;
+					}
+				}
+
+				chg->count_run++;/*count ++*/
+
+				if (chg->count_run > chg->count_total) {
+					chg->count_run = 0;
+					smblib_dbg(chg, PR_FAST_DEBUG, "count reset!\n");
+				}
+			}
+		} else {/*<10*/
 		vote(chg->usb_icl_votable, SW_ICL_MAX_VOTER, true, rp_ua);
 		break;
 	case POWER_SUPPLY_TYPE_USB_FLOAT:
